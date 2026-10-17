@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -166,6 +166,12 @@ type Runner struct {
 	// Fake signal callbacks
 	callbackErr  string
 	callbackExit string
+
+	sys       *shellSystem
+	trapOwner bool
+	fds       [10]any
+	tailStmt  *syntax.Stmt
+	tailNow   bool
 }
 
 // exitStatus holds the state of the shell after running one command.
@@ -247,6 +253,8 @@ type bgProc struct {
 	done chan struct{}
 
 	exit *exitStatus
+
+	pid int
 }
 
 type alias struct {
@@ -822,6 +830,11 @@ func (r *Runner) Reset() {
 
 		dirStack: r.dirStack[:0],
 		usedNew:  r.usedNew,
+
+		sys:       r.sys,
+		trapOwner: r.trapOwner,
+		tailStmt:  r.tailStmt,
+		fds:       r.fds,
 	}
 	// Ensure we stop referencing any pointers before we reuse bgProcs.
 	clear(r.bgProcs)
@@ -926,6 +939,7 @@ func (r *Runner) Run(ctx context.Context, node syntax.Node) error {
 	default:
 		return fmt.Errorf("node can only be File, Stmt, or Command: %T", node)
 	}
+	r.runPendingTraps(ctx)
 	r.trapCallback(ctx, r.callbackExit, "exit")
 	maps.Insert(r.Vars, r.writeEnv.Each)
 	// Return the first of: a fatal error, a non-fatal handler error, or the exit code.
@@ -995,6 +1009,9 @@ func (r *Runner) subshell(background bool) *Runner {
 		lastExit:       r.lastExit,
 
 		origStdout: r.origStdout, // used for process substitutions
+
+		sys: r.sys,
+		fds: r.fds,
 	}
 	r2.writeEnv = newOverlayEnviron(r.writeEnv, background)
 	// Funcs are copied, since they might be modified.

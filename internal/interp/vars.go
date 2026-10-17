@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"strings"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -166,12 +166,16 @@ func (r *Runner) lookupVar(name string) expand.Variable {
 		}
 	case "!":
 		if n := len(r.bgProcs); n > 0 {
-			vr.Kind, vr.Str = expand.String, "g"+strconv.Itoa(n)
+			if pid := r.bgProcs[n-1].pid; pid > 0 {
+				vr.Kind, vr.Str = expand.String, strconv.Itoa(pid)
+			} else {
+				vr.Kind, vr.Str = expand.String, "g"+strconv.Itoa(n)
+			}
 		}
 	case "?":
 		vr.Kind, vr.Str = expand.String, strconv.Itoa(int(r.lastExit.code))
 	case "$":
-		vr.Kind, vr.Str = expand.String, strconv.Itoa(os.Getpid())
+		vr.Kind, vr.Str = expand.String, strconv.Itoa(r.shellPID())
 	case "PPID":
 		vr.Kind, vr.Str = expand.String, strconv.Itoa(os.Getppid())
 	case "RANDOM": // not for cryptographic use

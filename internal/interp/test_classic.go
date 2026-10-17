@@ -183,6 +183,10 @@ func testBinaryOp(val string) syntax.BinTestOperator {
 		return syntax.TsMatch
 	case "!=":
 		return syntax.TsNoMatch
+	case "<":
+		return syntax.TsBefore
+	case ">":
+		return syntax.TsAfter
 	case "-nt":
 		return syntax.TsNewer
 	case "-ot":

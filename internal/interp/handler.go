@@ -5,6 +5,7 @@ package interp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -14,9 +15,10 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -138,8 +140,24 @@ func DefaultExecHandler(killTimeout time.Duration) ExecHandlerFunc {
 			Stdout: hc.Stdout,
 			Stderr: hc.Stderr,
 		}
+		if hc.runner != nil {
+			cmd.ExtraFiles = hc.runner.extraFiles()
+		}
 
 		err = cmd.Start()
+		if errors.Is(err, syscall.ENOEXEC) && hc.runner != nil && hc.runner.sys != nil && hc.runner.sys.self != "" {
+			cmd = exec.Cmd{
+				Path:       hc.runner.sys.self,
+				Args:       append([]string{args[0], path}, args[1:]...),
+				Env:        cmd.Env,
+				Dir:        cmd.Dir,
+				Stdin:      cmd.Stdin,
+				Stdout:     cmd.Stdout,
+				Stderr:     cmd.Stderr,
+				ExtraFiles: cmd.ExtraFiles,
+			}
+			err = cmd.Start()
+		}
 		if err == nil {
 			stopf := context.AfterFunc(ctx, func() {
 				if killTimeout <= 0 || runtime.GOOS == "windows" {

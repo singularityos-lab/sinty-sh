@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/term"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 

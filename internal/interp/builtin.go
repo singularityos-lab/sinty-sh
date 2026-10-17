@@ -19,7 +19,7 @@ import (
 
 	"golang.org/x/term"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -323,29 +323,11 @@ func (r *Runner) builtin(ctx context.Context, pos syntax.Pos, name string, args 
 		fp := flagParser{remaining: args}
 		for fp.more() {
 			switch flag := fp.flag(); flag {
-			case "-n", "-p":
-				return failf(2, "wait: unsupported option %q\n", flag)
 			default:
 				return failf(2, "wait: invalid option %q\n", flag)
 			}
 		}
-		if len(args) == 0 {
-			// Note that "wait" without arguments always returns exit status zero.
-			for _, bg := range r.bgProcs {
-				<-bg.done
-			}
-			break
-		}
-		for _, arg := range args {
-			arg, ok := strings.CutPrefix(arg, "g")
-			pid := atoi(arg)
-			if !ok || pid <= 0 || pid > int64(len(r.bgProcs)) {
-				return failf(1, "wait: pid %s is not a child of this shell\n", arg)
-			}
-			bg := r.bgProcs[pid-1]
-			<-bg.done
-			exit = *bg.exit
-		}
+		exit = r.builtinWait(fp.args())
 	case "builtin":
 		if len(args) < 1 {
 			break
@@ -460,6 +442,11 @@ func (r *Runner) builtin(ctx context.Context, pos syntax.Pos, name string, args 
 			// it to look for the sourced script in the current directory.
 			path = args[0]
 		}
+		if r.sys != nil && r.sys.sourceCheck != nil {
+			if err := r.sys.sourceCheck(r.absPath(path)); err != nil {
+				return failf(1, "source: %v\n", err)
+			}
+		}
 		f, err := r.open(ctx, path, os.O_RDONLY, 0, false)
 		if err != nil {
 			return failf(1, "source: %v\n", err)
@@ -529,6 +516,9 @@ func (r *Runner) builtin(ctx context.Context, pos syntax.Pos, name string, args 
 		if len(args) == 0 {
 			r.keepRedirs = true
 			break
+		}
+		if r.sys != nil {
+			return r.replaceProcess(ctx, pos, args)
 		}
 		r.exit.exiting = true
 		r.exec(ctx, pos, args)
@@ -890,53 +880,15 @@ func (r *Runner) builtin(ctx context.Context, pos syntax.Pos, name string, args 
 		}
 
 	case "trap":
-		fp := flagParser{remaining: args}
-		callback := "-"
-		for fp.more() {
-			switch flag := fp.flag(); flag {
-			case "-l", "-p":
-				return failf(2, "trap: %q: NOT IMPLEMENTED flag\n", flag)
-			case "-":
-				// default signal
-			default:
-				r.errf("trap: %q: invalid option\n", flag)
-				r.errf("trap: usage: trap [-lp] [[arg] signal_spec ...]\n")
-				exit.code = 2
-				return exit
-			}
-		}
-		args := fp.args()
-		switch len(args) {
-		case 0:
-			// Print non-default signals
-			if r.callbackExit != "" {
-				r.outf("trap -- %q EXIT\n", r.callbackExit)
-			}
-			if r.callbackErr != "" {
-				r.outf("trap -- %q ERR\n", r.callbackErr)
-			}
-		case 1:
-			// assume it's a signal, the default will be restored
-		default:
-			callback = args[0]
-			args = args[1:]
-		}
-		// For now, treat both empty and - the same since ERR and EXIT have no
-		// default callback.
-		if callback == "-" {
-			callback = ""
-		}
-		for _, arg := range args {
-			switch arg {
-			case "ERR":
-				r.callbackErr = callback
-			case "EXIT":
-				r.callbackExit = callback
-			default:
-				return failf(2, "trap: %s: invalid signal specification\n", arg)
-			}
-		}
-
+		exit = r.builtinTrap(args)
+	case "kill":
+		exit = r.builtinKill(args)
+	case "umask":
+		exit = r.builtinUmask(args)
+	case "ulimit":
+		exit = r.builtinUlimit(args)
+	case "times":
+		exit = r.builtinTimes()
 	case "readarray", "mapfile":
 		dropDelim := false
 		delim := "\n"

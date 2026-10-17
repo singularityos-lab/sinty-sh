@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"mvdan.cc/sh/v3/expand"
+	"github.com/singularityos-lab/sinty-sh/internal/expand"
 	"github.com/singularityos-lab/sinty-sh/internal/shpattern"
 	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
@@ -304,7 +304,20 @@ func (r *Runner) stmt(ctx context.Context, st *syntax.Stmt) {
 	if r.stop(ctx) {
 		return
 	}
+	r.runPendingTraps(ctx)
+	if r.stop(ctx) {
+		return
+	}
 	r.exit = exitStatus{}
+	if (st.Background || st.Disown) && r.sys != nil && r.sys.self != "" {
+		bg, err := r.startBackground(ctx, st)
+		if err == nil {
+			r.bgProcs = append(r.bgProcs, bg)
+			r.lastExit = r.exit
+			return
+		}
+		r.errf("%s: cannot start background job: %v\n", r.shellName(), err)
+	}
 	if st.Background || st.Disown {
 		r2 := r.subshell(true)
 		st2 := *st
@@ -328,7 +341,8 @@ func (r *Runner) stmt(ctx context.Context, st *syntax.Stmt) {
 }
 
 func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
-	oldIn, oldOut, oldErr := r.stdin, r.stdout, r.stderr
+	oldIn, oldOut, oldErr, oldFDs := r.stdin, r.stdout, r.stderr, r.fds
+	var closers []io.Closer
 	for _, rd := range st.Redirs {
 		cls, err := r.redir(ctx, rd)
 		if err != nil {
@@ -336,9 +350,18 @@ func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
 			break
 		}
 		if cls != nil {
-			defer cls.Close()
+			closers = append(closers, cls)
 		}
 	}
+	defer func() {
+		if r.keepRedirs {
+			r.keepRedirs = false
+			return
+		}
+		for _, cls := range closers {
+			cls.Close()
+		}
+	}()
 	if r.exit.ok() && st.Cmd != nil {
 		r.cmd(ctx, st.Cmd)
 	}
@@ -361,7 +384,7 @@ func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
 		}
 	}
 	if !r.keepRedirs {
-		r.stdin, r.stdout, r.stderr = oldIn, oldOut, oldErr
+		r.stdin, r.stdout, r.stderr, r.fds = oldIn, oldOut, oldErr, oldFDs
 	}
 }
 
@@ -467,7 +490,9 @@ func (r *Runner) cmd(ctx context.Context, cm syntax.Command) {
 		trace.call(fields[0], fields[1:]...)
 		trace.newLineFlush()
 
+		r.tailNow = r.tailStmt != nil && r.tailStmt.Cmd == cm
 		r.call(ctx, cm.Args[0].Pos(), fields)
+		r.tailNow = false
 		for _, restore := range restores {
 			r.setVar(restore.name, restore.vr)
 		}
@@ -945,101 +970,6 @@ func (r *Runner) hdocReader(rd *syntax.Redirect) (*os.File, error) {
 	return pr, nil
 }
 
-func (r *Runner) redir(ctx context.Context, rd *syntax.Redirect) (io.Closer, error) {
-	if rd.Hdoc != nil {
-		pr, err := r.hdocReader(rd)
-		if err != nil {
-			return nil, err
-		}
-		r.stdin = pr
-		return pr, nil
-	}
-
-	orig := &r.stdout
-	if rd.N != nil {
-		switch rd.N.Value {
-		case "0":
-			// Note that the input redirects below always use stdin (0)
-			// because we don't support anything else right now.
-		case "1":
-			// The default for the output redirects below.
-		case "2":
-			orig = &r.stderr
-		default:
-			return nil, fmt.Errorf("unsupported redirect fd: %v", rd.N.Value)
-		}
-	}
-	arg := r.literal(rd.Word)
-	switch rd.Op {
-	case syntax.WordHdoc:
-		pr, pw, err := os.Pipe()
-		if err != nil {
-			return nil, err
-		}
-		r.stdin = pr
-		// We write to the pipe in a new goroutine,
-		// as pipe writes may block once the buffer gets full.
-		go func() {
-			pw.WriteString(arg)
-			pw.WriteString("\n")
-			pw.Close()
-		}()
-		return pr, nil
-	case syntax.DplOut:
-		switch arg {
-		case "1":
-			*orig = r.stdout
-		case "2":
-			*orig = r.stderr
-		case "-":
-			*orig = io.Discard // closing the output writer
-		default:
-			return nil, fmt.Errorf("unhandled %v arg: %q", rd.Op, arg)
-		}
-		return nil, nil
-	case syntax.RdrIn, syntax.RdrOut, syntax.AppOut,
-		syntax.RdrAll, syntax.AppAll:
-		// done further below
-	case syntax.DplIn:
-		switch arg {
-		case "-":
-			r.stdin = nil // closing the input file
-		default:
-			return nil, fmt.Errorf("unhandled %v arg: %q", rd.Op, arg)
-		}
-		return nil, nil
-	default:
-		return nil, fmt.Errorf("unhandled redirect op: %v", rd.Op)
-	}
-	mode := os.O_RDONLY
-	switch rd.Op {
-	case syntax.AppOut, syntax.AppAll:
-		mode = os.O_WRONLY | os.O_CREATE | os.O_APPEND
-	case syntax.RdrOut, syntax.RdrAll:
-		mode = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
-	}
-	f, err := r.open(ctx, arg, mode, 0o644, true)
-	if err != nil {
-		return nil, err
-	}
-	switch rd.Op {
-	case syntax.RdrIn:
-		stdin, err := stdinFile(f)
-		if err != nil {
-			return nil, err
-		}
-		r.stdin = stdin
-	case syntax.RdrOut, syntax.AppOut:
-		*orig = f
-	case syntax.RdrAll, syntax.AppAll:
-		r.stdout = f
-		r.stderr = f
-	default:
-		return nil, fmt.Errorf("unhandled redirect op: %v", rd.Op)
-	}
-	return f, nil
-}
-
 func (r *Runner) loopStmtsBroken(ctx context.Context, stmts []*syntax.Stmt) bool {
 	oldInLoop := r.inLoop
 	r.inLoop = true
@@ -1073,6 +1003,7 @@ func (r *Runner) call(ctx context.Context, pos syntax.Pos, args []string) {
 	}
 	name := args[0]
 	if body := r.Funcs[name]; body != nil {
+		r.tailNow = false
 		// stack them to support nested func calls
 		oldParams := r.Params
 		r.Params = args[1:]
@@ -1094,7 +1025,13 @@ func (r *Runner) call(ctx context.Context, pos syntax.Pos, args []string) {
 		return
 	}
 	if IsBuiltin(name) {
+		r.tailNow = false
 		r.exit = r.builtin(ctx, pos, name, args[1:])
+		return
+	}
+	if r.tailNow && r.tailAllowed() {
+		r.tailNow = false
+		r.exit = r.replaceProcess(ctx, pos, args)
 		return
 	}
 	r.exec(ctx, pos, args)

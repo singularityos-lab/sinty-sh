@@ -1,0 +1,6 @@
+/sinty-sh
+*.test
+*.out
+
+.DS_Store
+*.swp
