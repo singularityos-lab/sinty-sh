@@ -98,3 +98,30 @@ func TestTailExecKeepsPid(t *testing.T) {
 		t.Fatalf("the last command of -c did not replace the shell: %q", out)
 	}
 }
+
+func TestExecPassesOneValuePerVariable(t *testing.T) {
+	for _, script := range []string{
+		`export FOO=2; unset BAR; exec env`,
+		`export FOO=2; unset BAR; env`,
+		`export FOO=2; unset BAR; env; true`,
+	} {
+		cmd := exec.Command(shellBin, "-c", script)
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "FOO=1", "BAR=1"}
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var foo [][]byte
+		for _, line := range bytes.Split(out, []byte("\n")) {
+			if bytes.HasPrefix(line, []byte("FOO=")) {
+				foo = append(foo, line)
+			}
+			if bytes.HasPrefix(line, []byte("BAR=")) {
+				t.Errorf("%s: an unset variable reached the child: %s", script, line)
+			}
+		}
+		if len(foo) != 1 || string(foo[0]) != "FOO=2" {
+			t.Errorf("%s: the child saw %q, want exactly FOO=2", script, foo)
+		}
+	}
+}

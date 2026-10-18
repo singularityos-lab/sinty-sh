@@ -128,24 +128,30 @@ func (o *overlayEnviron) Each(f func(name string, vr expand.Variable) bool) {
 
 func execEnv(env expand.Environ) []string {
 	list := make([]string, 0, 64)
+	index := make(map[string]int)
 	for name, vr := range env.Each {
-		if !vr.IsSet() {
-			// If a variable is set globally but unset in the
-			// runner, we need to ensure it's not part of the final
-			// list. Seems like zeroing the element is enough.
-			// This is a linear search, but this scenario should be
-			// rare, and the number of variables shouldn't be large.
-			for i, kv := range list {
-				if strings.HasPrefix(kv, name+"=") {
-					list[i] = ""
-				}
+		i, seen := index[name]
+		if !vr.IsSet() || !vr.Exported || vr.Kind != expand.String {
+			if seen {
+				list[i] = ""
 			}
+			continue
 		}
-		if vr.Exported && vr.Kind == expand.String {
-			list = append(list, name+"="+vr.String())
+		kv := name + "=" + vr.String()
+		if seen {
+			list[i] = kv
+			continue
+		}
+		index[name] = len(list)
+		list = append(list, kv)
+	}
+	out := list[:0]
+	for _, kv := range list {
+		if kv != "" {
+			out = append(out, kv)
 		}
 	}
-	return list
+	return out
 }
 
 func (r *Runner) lookupVar(name string) expand.Variable {
