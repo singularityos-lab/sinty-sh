@@ -372,6 +372,7 @@ func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
 			r.exit.clear()
 		}
 	} else if b, ok := st.Cmd.(*syntax.BinaryCmd); ok && (b.Op == syntax.AndStmt || b.Op == syntax.OrStmt) {
+	} else if isCompound(st.Cmd) {
 	} else if !r.exit.ok() && !r.noErrExit {
 		r.trapCallback(ctx, r.callbackErr, "error")
 		// If the "errexit" option is set and a command failed, exit the shell. Exceptions:
@@ -386,6 +387,14 @@ func (r *Runner) stmtSync(ctx context.Context, st *syntax.Stmt) {
 	if !r.keepRedirs {
 		r.stdin, r.stdout, r.stderr, r.fds = oldIn, oldOut, oldErr, oldFDs
 	}
+}
+
+func isCompound(cm syntax.Command) bool {
+	switch cm.(type) {
+	case *syntax.Block, *syntax.IfClause, *syntax.WhileClause, *syntax.ForClause, *syntax.CaseClause:
+		return true
+	}
+	return false
 }
 
 func (r *Runner) cmd(ctx context.Context, cm syntax.Command) {
